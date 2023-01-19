@@ -1,0 +1,7 @@
+{
+    "output_dir": "test_gpt2",
+    "logging_steps": 10,
+    "report_to": "wandb",
+    "fp16": true,
+    "per_device_train_batch_size": 16
+}
