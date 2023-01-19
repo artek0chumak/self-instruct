@@ -1,7 +1,24 @@
 {
-    "output_dir": "test_gpt2",
+    "output_dir": "gpt-j-6b",
     "logging_steps": 10,
     "report_to": "wandb",
     "fp16": true,
-    "per_device_train_batch_size": 16
+    "per_device_train_batch_size": 4,
+    "gradient_accumulation_steps": 4,
+    "deepspeed": {
+        "zero_optimization": {
+            "stage": 2
+        },
+        "fp16": {
+            "enabled": "auto",
+            "loss_scale": 0,
+            "loss_scale_window": 1000,
+            "initial_scale_power": 16,
+            "hysteresis": 2,
+            "min_loss_scale": 1
+        },
+        "gradient_accumulation_steps": "auto",
+        "train_batch_size": "auto",
+        "train_micro_batch_size_per_gpu": "auto"
+    }
 }

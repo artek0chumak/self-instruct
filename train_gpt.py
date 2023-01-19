@@ -1,4 +1,5 @@
 import json
+import os
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
@@ -15,7 +16,10 @@ class SelfInstructDataset(torch.utils.data.Dataset):
         tokenized_completion = tokenizer([d["completion"] for d in self.text_data])["input_ids"]
 
         self.data = []
-        for prompt, completion in tqdm(zip(tokenized_prompt, tokenized_completion), total=len(tokenized_prompt)):
+        data_iters = zip(tokenized_prompt, tokenized_completion)
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        pbar = tqdm(data_iters, total=len(tokenized_prompt)) if local_rank == 0 else data_iters
+        for prompt, completion in pbar:
             if len(prompt) + len(completion) < model.config.n_positions:
                 rest = [model.config.eos_token_id for _ in range(model.config.n_positions - len(prompt) - len(completion))]
                 input_ids = prompt + completion + rest
@@ -45,13 +49,13 @@ def parse_args() -> Namespace:
     parser = ArgumentParser()
     parser.add_argument("--data_file", default="data/finetuning/self_instruct_221203/gpt3_finetuning_data.jsonl")
     parser.add_argument("--config_file", default="training_config.json")
-    parser.add_argument("--model_name", default="gpt2")
+    parser.add_argument("--model_name", default="EleutherAI/gpt-j-6B")
     return parser.parse_args()
 
 
 def main(args: Namespace):
     training_args = transformers.HfArgumentParser(transformers.Seq2SeqTrainingArguments).parse_json_file(args.config_file)[0]
-    model = transformers.AutoModelForCausalLM.from_pretrained(args.model_name)
+    model = transformers.AutoModelForCausalLM.from_pretrained(args.model_name, low_cpu_mem_usage=True, device_map="auto", torch_dtype=torch.float16)
     tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.pad_token = tokenizer.eos_token
     dataset = SelfInstructDataset(args.data_file, tokenizer, model)
