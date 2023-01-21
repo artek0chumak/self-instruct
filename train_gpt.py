@@ -1,15 +1,21 @@
+import dataclasses
 import json
 import os
+import random
+import numpy as np
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
+import deepspeed
 import torch
 import transformers
+import wandb
 from tqdm.auto import tqdm
+import bitsandbytes as bnb
 
 
 class SelfInstructDataset(torch.utils.data.Dataset):
-    def __init__(self, data_file: Path, tokenizer: transformers.PreTrainedTokenizer, model: transformers.PreTrainedModel):
+    def __init__(self, data_file: Path, tokenizer: transformers.PreTrainedTokenizer, model: transformers.PreTrainedModel, max_length=2048):
         
         self.text_data = [json.loads(line) for line in open(data_file)]
         tokenized_prompt = tokenizer([d["prompt"] for d in self.text_data])["input_ids"]
@@ -20,23 +26,28 @@ class SelfInstructDataset(torch.utils.data.Dataset):
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         pbar = tqdm(data_iters, total=len(tokenized_prompt)) if local_rank == 0 else data_iters
         for prompt, completion in pbar:
-            if len(prompt) + len(completion) < model.config.n_positions:
-                rest = [model.config.eos_token_id for _ in range(model.config.n_positions - len(prompt) - len(completion))]
-                input_ids = prompt + completion + rest
-                attention_mask = [1 for _ in range(len(prompt) + len(completion))] + [0 for _ in range(len(rest))]
-                labels = [-100 for _ in range(len(prompt) - 1)] + completion + [-100 for _ in range(len(rest) + 1)]
+            prompt = np.array(prompt)
+            completion = np.array(completion)
+            attention_mask = np.ones(max_length)
+            labels = np.ones(max_length) * -100
+            if len(prompt) + len(completion) < max_length:
+                input_ids = np.ones(max_length) * model.config.eos_token_id
+                input_ids[:len(prompt)] = prompt
+                input_ids[len(prompt):len(prompt) + len(completion)] = completion
+                attention_mask[len(prompt) + len(completion):] = 0
             else:
-                prompt = prompt[-(model.config.n_positions - len(completion)):]
-                input_ids = prompt + completion
-                attention_mask = [1 for _ in range(len(prompt) + len(completion))]
-                labels = [-100 for _ in range(len(prompt) - 1)] + completion + [-100]
-            self.data.append(
-                {
-                    "input_ids": torch.Tensor(input_ids).to(torch.long),
-                    "attention_mask": torch.Tensor(attention_mask).to(torch.long),
-                    "labels": torch.Tensor(labels).to(torch.long),
-                }
-            )
+                prompt = prompt[-(max_length - len(completion)):]
+                input_ids = np.concatenate((prompt, completion))
+            labels[len(prompt) - 1:len(prompt) + len(completion) - 1] = completion
+            for _ in range(3):
+                self.data.append(
+                    {
+                        "input_ids": torch.Tensor(input_ids).to(torch.long),
+                        "attention_mask": torch.Tensor(attention_mask).to(torch.long),
+                        "labels": torch.Tensor(labels).to(torch.long),
+                    }
+                )
+        random.shuffle(self.data)
     
     def __getitem__(self, idx):
         return self.data[idx]
@@ -54,17 +65,47 @@ def parse_args() -> Namespace:
 
 
 def main(args: Namespace):
+    deepspeed.init_distributed()
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    device = torch.device("cuda", local_rank)
     training_args = transformers.HfArgumentParser(transformers.Seq2SeqTrainingArguments).parse_json_file(args.config_file)[0]
-    model = transformers.AutoModelForCausalLM.from_pretrained(args.model_name, low_cpu_mem_usage=True, device_map="auto", torch_dtype=torch.float16)
+    training_args.deepspeed["fp16"]["enabled"] = training_args.fp16
+    training_args.deepspeed["gradient_accumulation_steps"] = training_args.gradient_accumulation_steps
+    training_args.deepspeed["train_micro_batch_size_per_gpu"] = training_args.per_device_train_batch_size
+    if local_rank == 0:
+        wandb.init(
+            "self-instruct-gpt-j",
+            config=dataclasses.asdict(training_args),
+        )
+    
+    model = transformers.AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.float16, use_cache=False)
+    optimizer = bnb.optim.AdamW8bit(
+        [p for n, p in model.named_parameters() if (n.find("bias") > 0) or (n.find("lm_head") > 0)],
+        lr=training_args.learning_rate,
+        betas=(training_args.adam_beta1, training_args.adam_beta2),
+        weight_decay=training_args.weight_decay,
+    )
+    # optimizer = None
     tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.pad_token = tokenizer.eos_token
     dataset = SelfInstructDataset(args.data_file, tokenizer, model)
-    trainer = transformers.Seq2SeqTrainer(
+    model_engine, optimizer, training_dataloader, lr_scheduler = deepspeed.initialize(
         model=model,
-        args=training_args,
-        train_dataset=dataset,
+        optimizer=optimizer,
+        training_data=dataset,
+        config=training_args.deepspeed,
     )
-    trainer.train()
+
+    pbar = tqdm(training_dataloader) if local_rank == 0 else training_dataloader
+    for idx, batch in enumerate(pbar):
+        output = model_engine(**{k: v.to(device) for k, v in batch.items()})
+        model_engine.backward(output.loss)
+        model_engine.step()
+        if local_rank == 0 and idx % training_args.gradient_accumulation_steps == 0:
+            pbar.set_description(f"Loss: {output.loss}")
+            wandb.log({"Train Loss": output.loss})
+                
+    model_engine.save_checkpoint(training_args.output_dir)
 
 
 if __name__ == "__main__":
