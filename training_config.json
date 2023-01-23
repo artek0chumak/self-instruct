@@ -1,5 +1,5 @@
 {
-    "output_dir": "gpt-j-6b",
+    "output_dir": "gpt-j-6b-2v",
     "logging_steps": 10,
     "report_to": "wandb",
     "fp16": true,

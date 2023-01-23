@@ -20,35 +20,67 @@ class SelfInstructDataset(torch.utils.data.Dataset):
         self.text_data = [json.loads(line) for line in open(data_file)]
         tokenized_prompt = tokenizer([d["prompt"] for d in self.text_data])["input_ids"]
         tokenized_completion = tokenizer([d["completion"] for d in self.text_data])["input_ids"]
+        data_iters = [(p, c) for p, c in zip(tokenized_prompt, tokenized_completion)]
 
         self.data = []
-        data_iters = zip(tokenized_prompt, tokenized_completion)
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        pbar = tqdm(data_iters, total=len(tokenized_prompt)) if local_rank == 0 else data_iters
-        for prompt, completion in pbar:
-            prompt = np.array(prompt)
-            completion = np.array(completion)
-            attention_mask = np.ones(max_length)
-            labels = np.ones(max_length) * -100
-            if len(prompt) + len(completion) < max_length:
-                input_ids = np.ones(max_length) * model.config.eos_token_id
-                input_ids[:len(prompt)] = prompt
-                input_ids[len(prompt):len(prompt) + len(completion)] = completion
-                attention_mask[len(prompt) + len(completion):] = 0
-            else:
-                prompt = prompt[-(max_length - len(completion)):]
-                input_ids = np.concatenate((prompt, completion))
-            labels[len(prompt) - 1:len(prompt) + len(completion) - 1] = completion
-            for _ in range(3):
+        for _ in range(3):
+            tmp_input_ids = []
+            tmp_labels = []
+            tmp_attention_mask = []
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+            pbar = tqdm(data_iters, total=len(tokenized_prompt)) if local_rank == 0 else data_iters
+            for prompt, completion in pbar:
+                if len(tmp_input_ids) + len(prompt) + len(completion) > max_length:
+                    tmp_input_ids.extend(
+                        model.config.eos_token_id for _ in range(max_length - len(tmp_input_ids))
+                    )
+                    tmp_attention_mask.extend(0 for _ in range(max_length - len(tmp_attention_mask)))
+                    tmp_labels.extend(-100 for _ in range(max_length - len(tmp_labels)))
+                    self.data.append(
+                        {
+                            "input_ids": torch.Tensor(tmp_input_ids).to(torch.long),
+                            "attention_mask": torch.Tensor(tmp_attention_mask).to(torch.long),
+                            "labels": torch.Tensor(tmp_labels).to(torch.long),
+                        }
+                    )
+                    tmp_input_ids = []
+                    tmp_attention_mask = []
+                    tmp_labels = []
+                    
+                tmp_input_ids.extend(prompt)
+                tmp_input_ids.extend(completion)
+
+                tmp_attention_mask.extend(1 for _ in prompt)
+                tmp_attention_mask.extend(1 for _ in completion[:-1])
+                tmp_attention_mask.append(0)
+
+                tmp_labels.extend(-100 for _ in prompt[:-1])
+                tmp_labels.extend(completion)
+                tmp_labels.append(-100)
+                
+                assert len(tmp_input_ids) == len(tmp_attention_mask), f"len(tmp_input_ids): {len(tmp_input_ids)}, len(tmp_attention_mask): {len(tmp_attention_mask)}"
+                assert len(tmp_input_ids) == len(tmp_labels), f"len(tmp_input_ids): {len(tmp_input_ids)}, len(tmp_labels): {len(tmp_labels)}"
+            
+            if len(tmp_input_ids) > 0:
+                tmp_input_ids.extend(
+                    model.config.eos_token_id for _ in range(max_length - len(tmp_input_ids))
+                )
+                tmp_attention_mask.extend(0 for _ in range(max_length - len(tmp_attention_mask)))
+                tmp_labels.extend(-100 for _ in range(max_length - len(tmp_labels)))
                 self.data.append(
                     {
-                        "input_ids": torch.Tensor(input_ids).to(torch.long),
-                        "attention_mask": torch.Tensor(attention_mask).to(torch.long),
-                        "labels": torch.Tensor(labels).to(torch.long),
+                        "input_ids": torch.Tensor(tmp_input_ids).to(torch.long),
+                        "attention_mask": torch.Tensor(tmp_attention_mask).to(torch.long),
+                        "labels": torch.Tensor(tmp_labels).to(torch.long),
                     }
                 )
-        random.shuffle(self.data)
-    
+                
+            random.shuffle(data_iters)
+            
+        for d in self.data:
+            for k in ["input_ids", "attention_mask", "labels"]:
+                assert d[k].size(0) == max_length, f"{k}: {d[k].size(0)}"
+
     def __getitem__(self, idx):
         return self.data[idx]
     
