@@ -1,11 +1,13 @@
 {
-    "output_dir": "gpt-j-6b-2v",
+    "output_dir": "gpt-j-6b-3v",
     "logging_steps": 10,
     "report_to": "wandb",
     "fp16": true,
     "per_device_train_batch_size": 2,
-    "gradient_accumulation_steps": 16,
-    "gradient_checkpointing": true,
+    "gradient_accumulation_steps": 4,
+    "save_steps": 32,
+    "gradient_checkpointing": false,
+    "weight_decay": 1e-2,
     "deepspeed": {
         "zero_optimization": {
             "stage": 2
