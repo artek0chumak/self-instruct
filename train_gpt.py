@@ -15,7 +15,7 @@ import bitsandbytes as bnb
 
 
 class SelfInstructDataset(torch.utils.data.Dataset):
-    def __init__(self, data_file: Path, tokenizer: transformers.PreTrainedTokenizer, model: transformers.PreTrainedModel, max_length=2048, number_of_repeates=10):
+    def __init__(self, data_file: Path, tokenizer: transformers.PreTrainedTokenizer, model: transformers.PreTrainedModel, max_length=2048, number_of_repeates=6):
         
         self.text_data = [json.loads(line) for line in open(data_file)]
         tokenized_prompt = tokenizer([d["prompt"] for d in self.text_data])["input_ids"]
@@ -53,12 +53,10 @@ class SelfInstructDataset(torch.utils.data.Dataset):
                 tmp_input_ids.extend(completion)
 
                 tmp_attention_mask.extend(1 for _ in prompt)
-                tmp_attention_mask.extend(1 for _ in completion[:-1])
-                tmp_attention_mask.append(0)
+                tmp_attention_mask.extend(1 for _ in completion)
 
-                tmp_labels.extend(-100 for _ in prompt[:-1])
+                tmp_labels.extend(-100 for _ in prompt)
                 tmp_labels.extend(completion)
-                tmp_labels.append(-100)
                 
                 assert len(tmp_input_ids) == len(tmp_attention_mask), f"len(tmp_input_ids): {len(tmp_input_ids)}, len(tmp_attention_mask): {len(tmp_attention_mask)}"
                 assert len(tmp_input_ids) == len(tmp_labels), f"len(tmp_input_ids): {len(tmp_input_ids)}, len(tmp_labels): {len(tmp_labels)}"
@@ -116,7 +114,7 @@ def main(args: Namespace):
     if training_args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
     optimizer = bnb.optim.AdamW8bit(
-        [p for n, p in model.named_parameters() if (n.find("bias") > 0) or (n.find("lm") > 0)],
+        [p for n, p in model.named_parameters() if (n.find("bias") > 0)],
         lr=training_args.learning_rate,
         betas=(training_args.adam_beta1, training_args.adam_beta2),
         weight_decay=training_args.weight_decay,
@@ -138,11 +136,12 @@ def main(args: Namespace):
         model_engine.backward(output.loss)
         model_engine.step()
         step_idx = idx // training_args.gradient_accumulation_steps
-        if local_rank == 0 and idx % training_args.gradient_accumulation_steps == 0:
-            pbar.set_description(f"Loss: {output.loss}")
-            wandb.log({"Train Loss": output.loss})
-        if step_idx > 0 and step_idx % training_args.save_steps == 0:
-            model_engine.save_checkpoint(training_args.output_dir)
+        if idx % training_args.gradient_accumulation_steps == 0:
+            if local_rank == 0:
+                pbar.set_description(f"Loss: {output.loss}")
+                wandb.log({"Train Loss": output.loss})
+            if step_idx > 0 and step_idx % training_args.save_steps == 0 and :
+                model_engine.save_checkpoint(training_args.output_dir)
                 
     model_engine.save_checkpoint(training_args.output_dir)
 
