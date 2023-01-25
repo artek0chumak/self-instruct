@@ -15,7 +15,7 @@ import bitsandbytes as bnb
 
 
 class SelfInstructDataset(torch.utils.data.Dataset):
-    def __init__(self, data_file: Path, tokenizer: transformers.PreTrainedTokenizer, model: transformers.PreTrainedModel, max_length=2048, number_of_repeates=6):
+    def __init__(self, data_file: Path, tokenizer: transformers.PreTrainedTokenizer, model: transformers.PreTrainedModel, max_length=1536, number_of_repeates=3):
         
         self.text_data = [json.loads(line) for line in open(data_file)]
         tokenized_prompt = tokenizer([d["prompt"] for d in self.text_data])["input_ids"]
@@ -109,23 +109,17 @@ def main(args: Namespace):
             "self-instruct-gpt-j",
             config=dataclasses.asdict(training_args),
         )
+        
+    transformers.set_seed(training_args.seed)
     
     model = transformers.AutoModelForCausalLM.from_pretrained(args.model_name, torch_dtype=torch.float16, use_cache=False)
     if training_args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
-    optimizer = bnb.optim.AdamW8bit(
-        [p for n, p in model.named_parameters() if (n.find("bias") > 0)],
-        lr=training_args.learning_rate,
-        betas=(training_args.adam_beta1, training_args.adam_beta2),
-        weight_decay=training_args.weight_decay,
-    )
-    # optimizer = None
     tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_name)
     tokenizer.pad_token = tokenizer.eos_token
     dataset = SelfInstructDataset(args.data_file, tokenizer, model)
     model_engine, optimizer, training_dataloader, lr_scheduler = deepspeed.initialize(
         model=model,
-        optimizer=optimizer,
         training_data=dataset,
         config=training_args.deepspeed,
     )
@@ -140,7 +134,7 @@ def main(args: Namespace):
             if local_rank == 0:
                 pbar.set_description(f"Loss: {output.loss}")
                 wandb.log({"Train Loss": output.loss})
-            if step_idx > 0 and step_idx % training_args.save_steps == 0 and :
+            if step_idx > 0 and step_idx % training_args.save_steps == 0:
                 model_engine.save_checkpoint(training_args.output_dir)
                 
     model_engine.save_checkpoint(training_args.output_dir)
