@@ -15,7 +15,7 @@ import bitsandbytes as bnb
 
 
 class SelfInstructDataset(torch.utils.data.Dataset):
-    def __init__(self, data_file: Path, tokenizer: transformers.PreTrainedTokenizer, model: transformers.PreTrainedModel, max_length=1536, number_of_repeates=3):
+    def __init__(self, data_file: Path, tokenizer: transformers.PreTrainedTokenizer, model: transformers.PreTrainedModel, max_length=1536, number_of_repeates=1):
         
         self.text_data = [json.loads(line) for line in open(data_file)]
         tokenized_prompt = tokenizer([d["prompt"] for d in self.text_data])["input_ids"]
@@ -92,7 +92,7 @@ def parse_args() -> Namespace:
     parser = ArgumentParser()
     parser.add_argument("--data_file", default="data/finetuning/self_instruct_221203/gpt3_finetuning_data.jsonl")
     parser.add_argument("--config_file", default="training_config.json")
-    parser.add_argument("--model_name", default="EleutherAI/gpt-j-6B")
+    parser.add_argument("--model_name", default="togethercomputer/GPT-JT-6B-v1")
     return parser.parse_args()
 
 
@@ -106,7 +106,7 @@ def main(args: Namespace):
     training_args.deepspeed["train_micro_batch_size_per_gpu"] = training_args.per_device_train_batch_size
     if local_rank == 0:
         wandb.init(
-            "self-instruct-gpt-j",
+            "self-instruct-gpt-jt",
             config=dataclasses.asdict(training_args),
         )
         
